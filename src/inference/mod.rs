@@ -59,8 +59,8 @@ pub fn run_iterative_inference(
         let iter_inputs = prepare_iteration_inputs(&state.sbi, &state.ancf, data, config);
         
         let optimization_results: Vec<OptimizationResult> = (0..data.n_lineages)
-            //.into_par_iter()
-            .into_iter()
+            .into_par_iter()
+            //.into_iter()
             .map(|i| {
                 let ctx = CostContext {
                     lineage_idx: i,
