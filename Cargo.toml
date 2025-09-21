@@ -16,7 +16,7 @@ num-traits = "0.2"
 
 [profile.release]
 debug = false
-#strip = true      # Automatically strip symbols from the binary.
-#lto = "fat"       # Enable Link-Time Optimizations.
-#codegen-units = 1 # Maximize optimizations across the entire crate.
+strip = true      # Automatically strip symbols from the binary.
+lto = "fat"       # Enable Link-Time Optimizations.
+codegen-units = 1 # Maximize optimizations across the entire crate.
 panic = "abort"   # Abort on panic for a smaller and slightly faster binary.

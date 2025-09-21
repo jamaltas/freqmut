@@ -4,6 +4,7 @@
 
 mod cost_functions;
 mod optimization;
+mod neldermead;
 
 use self::cost_functions::CostContext;
 use self::optimization::{find_best_model_for_lineage, OptimizationResult};
@@ -17,6 +18,9 @@ use ndarray::{s, Array1, Array2};
 use rayon::prelude::*;
 use std::error::Error;
 use quadrature::integrate;
+
+// kappa
+const KAP: f64 = 2.5;
 
 /// Holds the state that is updated at each iteration of the algorithm.
 struct InferenceState {
@@ -73,6 +77,8 @@ pub fn run_iterative_inference(
                     ancf_integral_v: &iter_inputs.ancf_integral_v,
                     ancf_time_lookup_y: &iter_inputs.ancf_time_lookup_y,
                     ancf_time_lookup_x: &iter_inputs.ancf_time_lookup_x,
+                    eef_at_t: &iter_inputs.eef_at_t,
+                    ancf_at_t: &iter_inputs.ancf_at_t,
                 };
                 find_best_model_for_lineage(&ctx)
             })
@@ -104,7 +110,7 @@ pub fn run_iterative_inference(
             break;
         }
 
-        println!("Time: {:.2}s", t_iter_start.elapsed().as_secs_f32());
+        println!("Time for iteration: {:.2?}", t_iter_start.elapsed());
     }
 
     let kmfine = data.time_fine.len();
@@ -133,6 +139,11 @@ struct IterationInputs<'a> {
     ancf_time_lookup_y: Vec<f64>,
     /// X-values (time) for reverse time lookup.
     ancf_time_lookup_x: Vec<f64>,
+    /// Pre-calculated eef values at each sparse `t_point`.
+    eef_at_t: Vec<f64>,
+    /// Pre-calculated ancf values at each sparse `t_point`.
+    ancf_at_t: Vec<f64>,
+
     _phantom: std::marker::PhantomData<&'a ()>,
 }
 
@@ -180,6 +191,21 @@ fn prepare_iteration_inputs<'a>(
         integrate(integrand, config.bounds.tau_min as f64, i, 1e-6).integral
     }).collect();
 
+    // Create slices once for efficiency
+    let tfine_slice = data.time_fine.as_slice().unwrap();
+    let afi_slice = afi.as_slice().unwrap();
+    let ancf_slice = ancf.as_slice().unwrap();
+
+    // Pre-calculate eef (from afi) at each sparse timepoint (t_points)
+    let eef_at_t: Vec<f64> = data.t_points.iter().map(|&tk| {
+        interp_zero_alloc(tfine_slice, afi_slice, tk as f64, &interp_mode)
+    }).collect();
+
+    // Pre-calculate ancf at each sparse timepoint (t_points)
+    let ancf_at_t: Vec<f64> = data.t_points.iter().map(|&tk| {
+        interp_zero_alloc(tfine_slice, ancf_slice, tk as f64, &interp_mode)
+    }).collect();
+
     IterationInputs {
         afi,
         ee_matrix,
@@ -187,6 +213,8 @@ fn prepare_iteration_inputs<'a>(
         ancf_integral_v,
         ancf_time_lookup_y,
         ancf_time_lookup_x,
+        eef_at_t,
+        ancf_at_t,
         _phantom: std::marker::PhantomData,
     }
 }
@@ -207,7 +235,7 @@ fn update_global_state(
 
         let cmuti_i = state.cmuti.row(i);
         let r_ref = data.reads[[i, 0]] / data.total_reads_per_timepoint[0];
-        let x0 = conv_r0(cmuti_i[0], r_ref, &config.bounds);
+        let x0 = conv_r0(cmuti_i[0], r_ref, KAP, data.total_reads_per_timepoint[0]);
         let s_val = conv_s(cmuti_i[1], &config.bounds);
         let tau = conv_tau(cmuti_i[2], &config.bounds);
         let eef_t1 = interp_zero_alloc(
@@ -264,8 +292,17 @@ fn initialize_state(data: &ExperimentData, config: &AppConfig) -> InferenceState
 
     let mut sbic = Array1::zeros(data.n_timepoints);
     for k in 1..data.n_timepoints {
-        let mut vals_k: Vec<f64> = data.reads.outer_iter().zip(&putneut).filter(|&(_, p)| *p).map(|(r, _)| r[k]).collect();
-        let mut vals_k_minus_1: Vec<f64> = data.reads.outer_iter().zip(&putneut).filter(|&(_, p)| *p).map(|(r, _)| r[k-1]).collect();
+        let mut vals_k: Vec<f64> = data.reads.outer_iter()
+            .zip(&putneut)
+            .filter(|&(_, p)| *p)
+            .map(|(row, _)| row[k] / data.total_reads_per_timepoint[k])
+            .collect();
+        
+        let mut vals_k_minus_1: Vec<f64> = data.reads.outer_iter()
+            .zip(&putneut)
+            .filter(|&(_, p)| *p)
+            .map(|(row, _)| row[k-1] / data.total_reads_per_timepoint[k-1])
+            .collect();
         
         let median_k = if vals_k.is_empty() { 1.0 } else { vals_k.sort_by(|a, b| a.partial_cmp(b).unwrap()); vals_k[vals_k.len() / 2] };
         let median_k_minus_1 = if vals_k_minus_1.is_empty() { 1.0 } else { vals_k_minus_1.sort_by(|a,b|a.partial_cmp(b).unwrap()); vals_k_minus_1[vals_k_minus_1.len() / 2] };

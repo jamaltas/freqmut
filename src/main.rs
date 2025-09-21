@@ -39,17 +39,17 @@ fn save_results(config: &AppConfig, results: &InferenceResult) -> Result<(), Box
     println!("\nWriting results...");
     
     write_ndarray_to_csv(
-        &format!("{}_freakmut_predicted_mutation_info.csv", config.save_prefix),
+        &format!("{}_freqmut_predicted_mutation_info.csv", config.save_prefix),
         &results.final_muti,
     )?;
     
     write_ndarray_to_csv(
-        &format!("{}_freakmut_predicted_mean_fitness.csv", config.save_prefix),
+        &format!("{}_freqmut_predicted_mean_fitness.csv", config.save_prefix),
         &results.sb_history,
     )?;
 
     write_ndarray_to_csv(
-        &format!("{}_freakmut_predicted_ancestor_fraction.csv", config.save_prefix),
+        &format!("{}_freqmut_predicted_ancestor_fraction.csv", config.save_prefix),
         &results.anc_history,
     )?;
 

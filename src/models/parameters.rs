@@ -22,10 +22,25 @@ fn logistic_transform(val: f64, min: f64, max: f64) -> f64 {
     (val.exp() / (1.0 + val.exp())) * (max - min) + min
 }
 
+/*
 pub fn conv_r0(cr0: f64, r_ref: f64, bounds: &ModelParameterBounds) -> f64 {
     let r0_min = r_ref * bounds.r0_rel_min;
     let r0_max = r_ref * bounds.r0_rel_max;
     logistic_transform(cr0, r0_min, r0_max)
+}
+*/
+
+pub fn conv_r0(cr0: f64, r_ref: f64, kap: f64, r1: f64) -> f64 {
+    if cr0 > 0.0 {
+        // This is the positive `cr0` branch from the Julia code.
+        let adjustment_term = (1.0 - (-cr0).exp()) * 3.0
+            * (0.5 * kap * (4.0 * r_ref * r1 + 3.0 * kap)).sqrt()
+            / r1;
+        r_ref + adjustment_term
+    } else {
+        // This is the non-positive `cr0` branch.
+        r_ref * cr0.exp()
+    }
 }
 
 pub fn conv_s(cs: f64, bounds: &ModelParameterBounds) -> f64 {

@@ -38,6 +38,11 @@ pub struct CostContext<'a> {
     pub ancf_integral_v: &'a [f64],
     pub ancf_time_lookup_y: &'a [f64],
     pub ancf_time_lookup_x: &'a [f64],
+    
+    /// Pre-calculated eef values at each sparse `t_point`.
+    pub eef_at_t: &'a [f64],
+    /// Pre-calculated ancf values at each sparse `t_point`.
+    pub ancf_at_t: &'a [f64],
 }
 
 // --- Neutral Model ---
@@ -51,7 +56,7 @@ impl CostFunction for NeutralCost<'_> {
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
         let r_ref = self.ctx.data.reads[[self.ctx.lineage_idx, 0]]
             / self.ctx.data.total_reads_per_timepoint[0];
-        let x0 = conv_r0(p[0], r_ref, &self.ctx.config.bounds);
+        let x0 = conv_r0(p[0], r_ref, KAP, self.ctx.data.total_reads_per_timepoint[0]);
 
         let mut logp = 0.0;
         for (k, &tk) in self.ctx.data.t_points.iter().enumerate() {
@@ -75,18 +80,16 @@ impl CostFunction for NonEcologyCost<'_> {
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
         let r_ref = self.ctx.data.reads[[self.ctx.lineage_idx, 0]]
             / self.ctx.data.total_reads_per_timepoint[0];
-        let x0 = conv_r0(p[0], r_ref, &self.ctx.config.bounds);
+        let x0 = conv_r0(p[0], r_ref, KAP, self.ctx.data.total_reads_per_timepoint[0]);
         let s_val = conv_s(p[1], &self.ctx.config.bounds);
         let tau = conv_tau(p[2], &self.ctx.config.bounds);
 
         let mut logp = 0.0;
-        let interp_mode = InterpMode::Extrapolate;
-        let eef_t1 = interp_zero_alloc(
-            self.ctx.data.time_fine.as_slice().unwrap(),
-            self.ctx.afi.as_slice().unwrap(),
-            self.ctx.data.t_points[0] as f64,
-            &interp_mode,
-        );
+        
+        // --- MODIFICATION: Use the lookup table ---
+        // The value for t=0 is the first element of our pre-calculated table.
+        let eef_t1 = self.ctx.eef_at_t[0];
+        let mut_base_term = 0.01 * x0 / eef_t1;
 
         for (k, &tk) in self.ctx.data.t_points.iter().enumerate() {
             let rt_neutral = self.ctx.data.total_reads_per_timepoint[k]
@@ -94,15 +97,13 @@ impl CostFunction for NonEcologyCost<'_> {
                 * self.ctx.ee_matrix[[self.ctx.data.t_points[0] as usize, tk as usize]];
 
             let mut rt_mut = 0.0;
-            if (tk as f64) >= tau {
-                let eef_tk = interp_zero_alloc(
-                    self.ctx.data.time_fine.as_slice().unwrap(),
-                    self.ctx.afi.as_slice().unwrap(),
-                    tk as f64,
-                    &interp_mode,
-                );
-                rt_mut = 0.01 * x0 * self.ctx.data.total_reads_per_timepoint[k] * eef_tk / eef_t1
-                    * (s_val * (tk as f64 - tau)).exp();
+            let tk_f64 = tk as f64;
+            if tk_f64 >= tau {
+                // --- MODIFICATION: Replace interp_zero_alloc with a direct lookup ---
+                let eef_tk = self.ctx.eef_at_t[k]; // This is now an O(1) lookup
+                
+                rt_mut = mut_base_term * self.ctx.data.total_reads_per_timepoint[k] * eef_tk
+                    * (s_val * (tk_f64 - tau)).exp();
             }
             logp += logpg(self.ctx.data.reads[[self.ctx.lineage_idx, k]], rt_neutral + rt_mut);
         }
@@ -121,7 +122,7 @@ impl CostFunction for EcologyCost<'_> {
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
         let r_ref = self.ctx.data.reads[[self.ctx.lineage_idx, 0]]
             / self.ctx.data.total_reads_per_timepoint[0];
-        let x0 = conv_r0(p[0], r_ref, &self.ctx.config.bounds);
+        let x0 = conv_r0(p[0], r_ref, KAP, self.ctx.data.total_reads_per_timepoint[0]);
         let s_val = conv_s(p[1], &self.ctx.config.bounds);
         let tau = conv_tau(p[2], &self.ctx.config.bounds);
         let xc = conv_xc(p[3], &self.ctx.config.bounds);
@@ -129,16 +130,16 @@ impl CostFunction for EcologyCost<'_> {
 
         let mut logp = 0.0;
         let interp_mode = InterpMode::Extrapolate;
+
+        // Slices for interpolations that *don't* happen in the loop
         let tfine_slice = self.ctx.data.time_fine.as_slice().unwrap();
-        let afi_slice = self.ctx.afi.as_slice().unwrap();
         let ancf_slice = self.ctx.ancf.as_slice().unwrap();
 
-        let eef_t1 = interp_zero_alloc(
-            tfine_slice,
-            afi_slice,
-            self.ctx.data.t_points[0] as f64,
-            &interp_mode,
-        );
+        // --- MODIFICATION: Use the lookup table ---
+        let eef_t1 = self.ctx.eef_at_t[0];
+        let mut_base_term = 0.01 * x0 / eef_t1;
+        // This interpolation is outside the loop, so it's fine.
+        let a_tau = interp_zero_alloc(tfine_slice, ancf_slice, tau, &interp_mode);
 
         for (k, &tk) in self.ctx.data.t_points.iter().enumerate() {
             let rt_neutral = self.ctx.data.total_reads_per_timepoint[k]
@@ -146,14 +147,16 @@ impl CostFunction for EcologyCost<'_> {
                 * self.ctx.ee_matrix[[self.ctx.data.t_points[0] as usize, tk as usize]];
 
             let mut rt_mut = 0.0;
-            if (tk as f64) >= tau {
-                let eef_tk = interp_zero_alloc(tfine_slice, afi_slice, tk as f64, &interp_mode);
-                rt_mut = 0.01 * x0 * self.ctx.data.total_reads_per_timepoint[k] * eef_tk / eef_t1
-                    * (s_val * (tk as f64 - tau)).exp();
+            let tk_f64 = tk as f64;
+            if tk_f64 >= tau {
+                // --- MODIFICATION: Replace interp_zero_alloc with a direct lookup ---
+                let eef_tk = self.ctx.eef_at_t[k];
+                rt_mut = mut_base_term * self.ctx.data.total_reads_per_timepoint[k] * eef_tk
+                    * (s_val * (tk_f64 - tau)).exp();
 
-                let a_tau = interp_zero_alloc(tfine_slice, ancf_slice, tau, &interp_mode);
                 if a_tau > xc {
-                    let a_tk = interp_zero_alloc(tfine_slice, ancf_slice, tk as f64, &interp_mode);
+                    // --- MODIFICATION: Replace interp_zero_alloc with a direct lookup ---
+                    let a_tk = self.ctx.ancf_at_t[k];
                     
                     let tend = if a_tk < xc {
                         interp_zero_alloc(
@@ -163,9 +166,8 @@ impl CostFunction for EcologyCost<'_> {
                             &interp_mode
                         )
                     } else {
-                        tk as f64
+                        tk_f64
                     };
-
                     let aif_tend = interp_zero_alloc(self.ctx.ancf_integral_t, self.ctx.ancf_integral_v, tend, &interp_mode);
                     let aif_tau = interp_zero_alloc(self.ctx.ancf_integral_t, self.ctx.ancf_integral_v, tau, &interp_mode);
                     rt_mut *= (m * (aif_tend - aif_tau - xc * (tend - tau))).exp();
