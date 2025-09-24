@@ -1,84 +1,41 @@
 // src/data.rs
-
-//! Data loading and representation.
-
-use crate::config::AppConfig;
-use ndarray::{Array, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis};
 use std::error::Error;
+use csv;
 
-/// Holds all the primary data for the experiment.
-pub struct ExperimentData {
-    /// Raw read counts for each lineage (row) at each timepoint (column).
-    pub reads: Array2<f64>,
-    /// The specific timepoints at which measurements were taken.
-    pub t_points: Array1<i32>,
-    /// Total reads across all lineages for each timepoint.
-    pub total_reads_per_timepoint: Array1<f64>,
-    /// A fine-grained time vector for accurate integration.
-    pub time_fine: Array1<f64>,
-    /// Number of lineages.
-    pub n_lineages: usize,
-    /// Number of measurement timepoints.
-    pub n_timepoints: usize,
-}
-
-impl ExperimentData {
-    /// Loads and preprocesses data based on the application configuration.
-    pub fn new(config: &AppConfig) -> Result<Self, Box<dyn Error>> {
-        println!("Loading data...");
-        
-        let reads_raw = read_csv_to_ndarray(&config.read_path, false)?;
-        
-        // Clamp reads to a minimum of 1.0 to avoid issues with log-likelihood.
-        let reads = reads_raw.mapv(|x| x.max(1.0));
-
-        let t_points = config.timepoints.clone();
-
-        // Create a fine-grained time vector for interpolation and integration.
-        let tfine_i32: Array1<i32> = (config.bounds.tau_min..=config.bounds.tau_max).collect();
-        let time_fine: Array1<f64> = tfine_i32.mapv(|x| x as f64);
-
-        let total_reads_per_timepoint: Array1<f64> = reads.sum_axis(Axis(0));
-        let n_lineages = reads.nrows();
-        let n_timepoints = t_points.len();
-
-        println!(
-            "Data loaded. NLin = {}, {} timepoints.",
-            n_lineages, n_timepoints
-        );
-
-        Ok(Self {
-            reads,
-            t_points,
-            total_reads_per_timepoint,
-            time_fine,
-            n_lineages,
-            n_timepoints,
-        })
-    }
-}
-
-
-/// Helper function to read a CSV file into an ndarray::Array2<f64>.
-fn read_csv_to_ndarray(filepath: &str, has_headers: bool) -> Result<Array2<f64>, Box<dyn Error>> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(has_headers)
-        .from_path(filepath)?;
-
-    let mut records = Vec::new();
-    let mut ncols = 0;
-    for result in rdr.records() {
+/// Loads a CSV file into an ndarray Array2<f64>.
+pub fn load_csv(path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
+    let mut reader = csv::ReaderBuilder::new().has_headers(false).from_path(path)?;
+    let mut data = Vec::new();
+    let mut n_cols = 0;
+    for result in reader.records() {
         let record = result?;
-        let row: Vec<f64> = record.iter().map(|s| s.parse().unwrap_or(0.0)).collect();
-        if ncols == 0 {
-            ncols = row.len();
+        if n_cols == 0 {
+            n_cols = record.len();
         }
-        records.extend_from_slice(&row);
+        for field in record.iter() {
+            data.push(field.trim().parse::<f64>()?);
+        }
     }
+    let n_rows = data.len() / n_cols;
+    Ok(Array2::from_shape_vec((n_rows, n_cols), data)?)
+}
+
+/// Preprocesses the raw simulation data.
+/// This corresponds to the initial data handling section of the Julia script.
+pub fn preprocess_data(
+    prefix: &str,
+) -> (Array2<f64>, Array1<f64>) {
     
-    if ncols == 0 {
-        return Ok(Array::from_shape_vec((0, 0), records)?);
-    }
-    let nrows = records.len() / ncols;
-    Ok(Array::from_shape_vec((nrows, ncols), records)?)
+    let reads_path = format!("{}/simu_3_EvoSimulation_Read_Number.csv", prefix);
+    //let reads_path = format!("{}/levy_50000.csv", prefix);
+    let mut reads = load_csv(&reads_path).expect("Failed to load Read Number CSV");
+
+    // Total read depth per time point
+    let r: Array1<f64> = reads.sum_axis(Axis(0));
+
+    // Replace read counts of 0 with 1
+    reads.mapv_inplace(|x| if x < 1.0 { 1.0 } else { x });
+    
+    (reads, r)
 }
