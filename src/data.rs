@@ -27,8 +27,8 @@ pub fn preprocess_data(
     prefix: &str,
 ) -> (Array2<f64>, Array1<f64>) {
     
-    let reads_path = format!("{}/simu_3_EvoSimulation_Read_Number.csv", prefix);
-    //let reads_path = format!("{}/levy_50000.csv", prefix);
+    //let reads_path = format!("{}/simu_3_EvoSimulation_Read_Number.csv", prefix);
+    let reads_path = format!("{}/Levy2015_1_counts_original.csv", prefix);
     let mut reads = load_csv(&reads_path).expect("Failed to load Read Number CSV");
 
     // Total read depth per time point
